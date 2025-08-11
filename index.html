@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Waku Collaborative Whiteboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.5.3/dist/protobuf.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: white;
+            padding: 1rem;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .connection-status {
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .connected {
+            background: #e8f5e8;
+            color: #2d5a2d;
+        }
+
+        .disconnected {
+            background: #ffeaea;
+            color: #8b0000;
+        }
+
+        .peer-count {
+            color: #666;
+            font-size: 0.9rem;
+        }
+
+        .toolbar {
+            background: white;
+            padding: 1rem;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        .tool-group {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .tool-group label {
+            font-size: 0.9rem;
+            color: #666;
+        }
+
+        .color-picker {
+            width: 40px;
+            height: 40px;
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .brush-size {
+            width: 100px;
+        }
+
+        .clear-btn {
+            background: #ff4757;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .clear-btn:hover {
+            background: #ff3742;
+        }
+
+        .canvas-container {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 1rem;
+        }
+
+        #whiteboard {
+            background: white;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            cursor: crosshair;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+
+        .pending-strokes {
+            position: fixed;
+            top: 100px;
+            right: 20px;
+            background: white;
+            padding: 1rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            max-width: 200px;
+        }
+
+        .pending-stroke {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem;
+            margin: 0.25rem 0;
+            background: #fff3cd;
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }
+
+        .pending-stroke.acknowledged {
+            background: #d4edda;
+        }
+
+        .spinner {
+            width: 12px;
+            height: 12px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #007bff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        .checkmark {
+            color: #28a745;
+            font-weight: bold;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .user-cursors {
+            position: absolute;
+            pointer-events: none;
+        }
+
+        .user-cursor {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            border: 2px solid white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            transform: translate(-50%, -50%);
+            transition: all 0.1s ease;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">🎨 Waku Collaborative Whiteboard</div>
+        <div class="status">
+            <div class="connection-status disconnected" id="connectionStatus">Disconnected</div>
+            <div class="peer-count" id="peerCount">0 peers</div>
+        </div>
+    </div>
+
+    <div class="toolbar">
+        <div class="tool-group">
+            <label>Color:</label>
+            <input type="color" class="color-picker" id="colorPicker" value="#000000">
+        </div>
+        <div class="tool-group">
+            <label>Size:</label>
+            <input type="range" class="brush-size" id="brushSize" min="1" max="20" value="3">
+            <span id="brushSizeValue">3px</span>
+        </div>
+        <button class="clear-btn" id="clearBtn">Clear Canvas</button>
+    </div>
+
+    <div class="canvas-container">
+        <canvas id="whiteboard" width="800" height="600"></canvas>
+        <div class="user-cursors" id="userCursors"></div>
+    </div>
+
+    <div class="pending-strokes" id="pendingStrokes" style="display: none;">
+        <h4>Pending Messages</h4>
+        <div id="pendingList"></div>
+    </div>
+
+    <script>
+        import {
+            createLightNode,
+            MessageChannelEvent,
+            MessageChannel
+        } from 'https://unpkg.com/@waku/sdk@0.0.34-ced989a.0/bundle/index.js';
+
+        // Define protobuf schema for whiteboard messages
+        const protoSchema = `
+            syntax = "proto3";
+            
+            message WhiteboardMessage {
+                uint64 timestamp = 1;
+                string userId = 2;
+                string messageId = 3;
+                oneof content {
+                    StrokeData stroke = 4;
+                    CursorData cursor = 5;
+                    ClearData clear = 6;
+                }
+            }
+            
+            message StrokeData {
+                string id = 1;
+                repeated Point points = 2;
+                string color = 3;
+                int32 size = 4;
+            }
+            
+            message Point {
+                float x = 1;
+                float y = 2;
+            }
+            
+            message CursorData {
+                float x = 1;
+                float y = 2;
+                string color = 3;
+            }
+            
+            message ClearData {
+                bool clearAll = 1;
+            }
+        `;
+
+        class CollaborativeWhiteboard {
+            constructor() {
+                this.canvas = document.getElementById('whiteboard');
+                this.ctx = this.canvas.getContext('2d');
+                this.contentTopic = '/collaborative-board/1/all/proto';
+                this.isDrawing = false;
+                this.currentStroke = [];
+                this.pendingStrokes = new Map();
+                this.acknowledgedStrokes = new Set();
+                this.userCursors = new Map();
+                this.userId = this.generateUserId();
+                this.userColor = this.generateRandomColor();
+                
+                this.initializeProtobuf();
+                this.setupCanvas();
+                this.setupEventListeners();
+                this.setupWakuEventListeners();
+                this.setInitialColor();
+            }
+
+            async initializeProtobuf() {
+                try {
+                    this.protobufRoot = protobuf.parse(protoSchema).root;
+                    this.WhiteboardMessage = this.protobufRoot.lookupType('WhiteboardMessage');
+                    console.log('Protobuf initialized successfully');
+                } catch (error) {
+                    console.error('Failed to initialize protobuf:', error);
+                }
+            }
+
+            generateUserId() {
+                return 'user_' + Math.random().toString(36).substr(2, 9);
+            }
+
+            generateRandomColor() {
+                const colors = [
+                    '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7',
+                    '#DDA0DD', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E9',
+                    '#F8C471', '#82E0AA', '#F1948A', '#85C1E9', '#D7BDE2'
+                ];
+                return colors[Math.floor(Math.random() * colors.length)];
+            }
+
+            setInitialColor() {
+                const colorPicker = document.getElementById('colorPicker');
+                colorPicker.value = this.userColor;
+                this.updateBrushSettings();
+            }
+
+            encodeStrokeMessage(strokeData) {
+                const message = {
+                    timestamp: Date.now(),
+                    userId: this.userId,
+                    messageId: strokeData.id,
+                    stroke: {
+                        id: strokeData.id,
+                        points: strokeData.points.map(p => ({ x: p.x, y: p.y })),
+                        color: strokeData.points[0].color,
+                        size: strokeData.points[0].size
+                    }
+                };
+                
+                const errMsg = this.WhiteboardMessage.verify(message);
+                if (errMsg) throw Error(errMsg);
+                
+                const encoded = this.WhiteboardMessage.encode(message).finish();
+                return encoded;
+            }
+
+            encodeCursorMessage(x, y) {
+                const message = {
+                    timestamp: Date.now(),
+                    userId: this.userId,
+                    messageId: 'cursor_' + Date.now(),
+                    cursor: {
+                        x: x,
+                        y: y,
+                        color: this.userColor
+                    }
+                };
+                
+                const errMsg = this.WhiteboardMessage.verify(message);
+                if (errMsg) throw Error(errMsg);
+                
+                const encoded = this.WhiteboardMessage.encode(message).finish();
+                return encoded;
+            }
+
+            encodeClearMessage() {
+                const message = {
+                    timestamp: Date.now(),
+                    userId: this.userId,
+                    messageId: 'clear_' + Date.now(),
+                    clear: {
+                        clearAll: true
+                    }
+                };
+                
+                const errMsg = this.WhiteboardMessage.verify(message);
+                if (errMsg) throw Error(errMsg);
+                
+                const encoded = this.WhiteboardMessage.encode(message).finish();
+                return encoded;
+            }
+
+            decodeMessage(encodedData) {
+                try {
+                    const decoded = this.WhiteboardMessage.decode(encodedData);
+                    return this.WhiteboardMessage.toObject(decoded);
+                } catch (error) {
+                    console.error('Failed to decode message:', error);
+                    return null;
+                }
+            }
+
+            setupCanvas() {
+                this.ctx.lineCap = 'round';
+                this.ctx.lineJoin = 'round';
+                this.updateBrushSettings();
+            }
+
+            setupEventListeners() {
+                // Canvas drawing events
+                this.canvas.addEventListener('mousedown', this.startDrawing.bind(this));
+                this.canvas.addEventListener('mousemove', this.draw.bind(this));
+                this.canvas.addEventListener('mouseup', this.stopDrawing.bind(this));
+                this.canvas.addEventListener('mouseout', this.stopDrawing.bind(this));
+
+                // Touch events for mobile
+                this.canvas.addEventListener('touchstart', this.handleTouch.bind(this));
+                this.canvas.addEventListener('touchmove', this.handleTouch.bind(this));
+                this.canvas.addEventListener('touchend', this.stopDrawing.bind(this));
+
+                // Cursor tracking
+                this.canvas.addEventListener('mousemove', this.trackCursor.bind(this));
+
+                // UI controls
+                document.getElementById('colorPicker').addEventListener('change', this.updateBrushSettings.bind(this));
+                document.getElementById('brushSize').addEventListener('input', this.updateBrushSettings.bind(this));
+                document.getElementById('clearBtn').addEventListener('click', this.clearCanvas.bind(this));
+            }
+
+            setupWakuEventListeners() {
+                // TODO: Implement Waku event listeners
+                
+                // Event: Message sent successfully
+                this.onMessageSent = (messageId, strokeData) => {
+                    console.log('Message sent:', messageId, strokeData);
+                    this.addPendingStroke(messageId, strokeData);
+                };
+
+                // Event: Message acknowledged by peers
+                this.onMessageAcknowledged = (messageId) => {
+                    console.log('Message acknowledged:', messageId);
+                    this.markStrokeAcknowledged(messageId);
+                };
+
+                // Event: New message received from peer
+                this.onMessageReceived = (encodedData, senderId) => {
+                    try {
+                        const decodedMessage = this.decodeMessage(encodedData);
+                        if (!decodedMessage) return;
+                        
+                        console.log('Message received:', decodedMessage);
+                        
+                        // Handle different message types
+                        if (decodedMessage.stroke) {
+                            this.drawReceivedStroke(decodedMessage.stroke, decodedMessage.userId);
+                        } else if (decodedMessage.cursor) {
+                            this.updateUserCursor(decodedMessage.userId, 
+                                                decodedMessage.cursor.x, 
+                                                decodedMessage.cursor.y, 
+                                                decodedMessage.cursor.color);
+                        } else if (decodedMessage.clear) {
+                            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                        }
+                    } catch (error) {
+                        console.error('Failed to process received message:', error);
+                    }
+                };
+
+                // Placeholder for Waku initialization
+                this.initializeWaku();
+            }
+
+            initializeWaku() {
+                // TODO: Initialize Waku connection
+                console.log('Initializing Waku...');
+                
+                // Simulate connection after delay
+                setTimeout(() => {
+                    this.updateConnectionStatus(true);
+                    this.updatePeerCount(0);
+                }, 2000);
+            }
+
+            startDrawing(e) {
+                this.isDrawing = true;
+                const rect = this.canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                
+                this.currentStroke = [{
+                    x: x,
+                    y: y,
+                    color: document.getElementById('colorPicker').value,
+                    size: parseInt(document.getElementById('brushSize').value),
+                    userId: this.userId,
+                    timestamp: Date.now()
+                }];
+
+                this.ctx.beginPath();
+                this.ctx.moveTo(x, y);
+            }
+
+            draw(e) {
+                if (!this.isDrawing) return;
+
+                const rect = this.canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+
+                this.currentStroke.push({
+                    x: x,
+                    y: y,
+                    color: this.currentStroke[0].color,
+                    size: this.currentStroke[0].size,
+                    userId: this.userId,
+                    timestamp: Date.now()
+                });
+
+                this.ctx.lineTo(x, y);
+                this.ctx.stroke();
+            }
+
+            stopDrawing() {
+                if (!this.isDrawing) return;
+                this.isDrawing = false;
+
+                if (this.currentStroke.length > 1) {
+                    const strokeData = {
+                        id: this.generateStrokeId(),
+                        points: this.currentStroke,
+                        userId: this.userId,
+                        timestamp: Date.now()
+                    };
+
+                    // TODO: Send stroke data via Waku
+                    this.sendStrokeMessage(strokeData);
+                }
+
+                this.currentStroke = [];
+            }
+
+            handleTouch(e) {
+                e.preventDefault();
+                const touch = e.touches[0];
+                const mouseEvent = new MouseEvent(e.type === 'touchstart' ? 'mousedown' : 
+                                                 e.type === 'touchmove' ? 'mousemove' : 'mouseup', {
+                    clientX: touch.clientX,
+                    clientY: touch.clientY
+                });
+                this.canvas.dispatchEvent(mouseEvent);
+            }
+
+            trackCursor(e) {
+                const rect = this.canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+
+                // TODO: Send cursor position via Waku
+                this.sendCursorPosition(x, y);
+            }
+
+            updateBrushSettings() {
+                const color = document.getElementById('colorPicker').value;
+                const size = parseInt(document.getElementById('brushSize').value);
+                
+                this.ctx.strokeStyle = color;
+                this.ctx.lineWidth = size;
+                
+                document.getElementById('brushSizeValue').textContent = size + 'px';
+            }
+
+            clearCanvas() {
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                
+                const clearMessage = {
+                    type: 'clear',
+                    userId: this.userId,
+                    timestamp: Date.now()
+                };
+
+                // TODO: Send clear message via Waku
+                this.sendClearMessage(clearMessage);
+            }
+
+            generateStrokeId() {
+                return 'stroke_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            }
+
+            // Waku message sending methods (to be implemented)
+            sendStrokeMessage(strokeData) {
+                try {
+                    const encodedMessage = this.encodeStrokeMessage(strokeData);
+                    console.log('Sending encoded stroke message:', encodedMessage);
+                    
+                    // TODO: Send encodedMessage via Waku
+                    // await this.wakuNode.lightPush.send(encodedMessage, { contentTopic: this.contentTopic });
+                    
+                    // Simulate message sent event
+                    setTimeout(() => {
+                        this.onMessageSent(strokeData.id, strokeData);
+                    }, 100);
+                } catch (error) {
+                    console.error('Failed to encode stroke message:', error);
+                }
+            }
+
+            sendCursorPosition(x, y) {
+                try {
+                    const encodedMessage = this.encodeCursorMessage(x, y);
+                    console.log('Sending encoded cursor message:', encodedMessage);
+                    
+                    // TODO: Send encodedMessage via Waku
+                    // await this.wakuNode.lightPush.send(encodedMessage, { contentTopic: this.contentTopic });
+                } catch (error) {
+                    console.error('Failed to encode cursor message:', error);
+                }
+            }
+
+            sendClearMessage(clearMessage) {
+                try {
+                    const encodedMessage = this.encodeClearMessage();
+                    console.log('Sending encoded clear message:', encodedMessage);
+                    
+                    // TODO: Send encodedMessage via Waku
+                    // await this.wakuNode.lightPush.send(encodedMessage, { contentTopic: this.contentTopic });
+                } catch (error) {
+                    console.error('Failed to encode clear message:', error);
+                }
+            }
+
+            // Message handling methods
+            addPendingStroke(messageId, strokeData) {
+                this.pendingStrokes.set(messageId, strokeData);
+                this.updatePendingStrokesUI();
+            }
+
+            markStrokeAcknowledged(messageId) {
+                this.acknowledgedStrokes.add(messageId);
+                this.updatePendingStrokesUI();
+                
+                // Remove from pending after a delay
+                setTimeout(() => {
+                    this.pendingStrokes.delete(messageId);
+                    this.updatePendingStrokesUI();
+                }, 2000);
+            }
+
+            drawReceivedStroke(strokeData, senderId) {
+                const points = strokeData.points;
+                if (!points || points.length < 2) return;
+
+                this.ctx.beginPath();
+                this.ctx.strokeStyle = strokeData.color;
+                this.ctx.lineWidth = strokeData.size;
+                this.ctx.moveTo(points[0].x, points[0].y);
+
+                for (let i = 1; i < points.length; i++) {
+                    this.ctx.lineTo(points[i].x, points[i].y);
+                }
+                
+                this.ctx.stroke();
+            }
+
+            updatePendingStrokesUI() {
+                const pendingContainer = document.getElementById('pendingStrokes');
+                const pendingList = document.getElementById('pendingList');
+                
+                if (this.pendingStrokes.size === 0) {
+                    pendingContainer.style.display = 'none';
+                    return;
+                }
+
+                pendingContainer.style.display = 'block';
+                pendingList.innerHTML = '';
+
+                this.pendingStrokes.forEach((strokeData, messageId) => {
+                    const div = document.createElement('div');
+                    div.className = 'pending-stroke';
+                    
+                    if (this.acknowledgedStrokes.has(messageId)) {
+                        div.classList.add('acknowledged');
+                        div.innerHTML = '<span class="checkmark">✓</span> Stroke delivered';
+                    } else {
+                        div.innerHTML = '<div class="spinner"></div> Sending stroke...';
+                    }
+                    
+                    pendingList.appendChild(div);
+                });
+            }
+
+            updateConnectionStatus(connected) {
+                const statusEl = document.getElementById('connectionStatus');
+                statusEl.textContent = connected ? 'Connected' : 'Disconnected';
+                statusEl.className = 'connection-status ' + (connected ? 'connected' : 'disconnected');
+            }
+
+            updatePeerCount(count) {
+                document.getElementById('peerCount').textContent = `${count} peer${count !== 1 ? 's' : ''}`;
+            }
+
+            updateUserCursor(userId, x, y, color) {
+                const cursorsContainer = document.getElementById('userCursors');
+                let cursor = cursorsContainer.querySelector(`[data-user-id="${userId}"]`);
+                
+                if (!cursor) {
+                    cursor = document.createElement('div');
+                    cursor.className = 'user-cursor';
+                    cursor.setAttribute('data-user-id', userId);
+                    cursorsContainer.appendChild(cursor);
+                }
+                
+                cursor.style.left = x + 'px';
+                cursor.style.top = y + 'px';
+                cursor.style.backgroundColor = color || '#007bff';
+            }
+        }
+
+        // Initialize the whiteboard when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            window.whiteboard = new CollaborativeWhiteboard();
+        });
+    </script>
+</body>
+</html>
