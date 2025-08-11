@@ -220,7 +220,7 @@
         <div id="pendingList"></div>
     </div>
 
-    <script>
+    <script type="module">
         import {
             createLightNode,
             MessageChannelEvent,
@@ -275,7 +275,8 @@
                 this.pendingStrokes = new Map();
                 this.acknowledgedStrokes = new Set();
                 this.userCursors = new Map();
-                this.userId = this.generateUserId();
+                this.connectedPeers = new Set();
+                this.userId = this.generateOrRetrieveUserId();
                 this.userColor = this.generateRandomColor();
                 
                 this.initializeProtobuf();
@@ -295,8 +296,24 @@
                 }
             }
 
-            generateUserId() {
-                return 'user_' + Math.random().toString(36).substr(2, 9);
+            generateOrRetrieveUserId() {
+                const STORAGE_KEY = 'waku_whiteboard_user_id';
+                
+                // Try to get existing user ID from localStorage
+                let userId = localStorage.getItem(STORAGE_KEY);
+                
+                if (!userId) {
+                    // Generate new user ID if none exists
+                    userId = 'user_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now().toString(36);
+                    
+                    // Save to localStorage for future sessions
+                    localStorage.setItem(STORAGE_KEY, userId);
+                    console.log('Generated new user ID:', userId);
+                } else {
+                    console.log('Retrieved existing user ID from cache:', userId);
+                }
+                
+                return userId;
             }
 
             generateRandomColor() {
@@ -330,8 +347,7 @@
                 const errMsg = this.WhiteboardMessage.verify(message);
                 if (errMsg) throw Error(errMsg);
                 
-                const encoded = this.WhiteboardMessage.encode(message).finish();
-                return encoded;
+                return this.WhiteboardMessage.encode(message).finish();
             }
 
             encodeCursorMessage(x, y) {
@@ -450,15 +466,85 @@
                 this.initializeWaku();
             }
 
-            initializeWaku() {
-                // TODO: Initialize Waku connection
-                console.log('Initializing Waku...');
-                
-                // Simulate connection after delay
-                setTimeout(() => {
+            async initializeWaku() {
+                try {
+                    console.log('Initializing Waku node...');
+                    this.updateConnectionStatus(false);
+                    
+                    // Create Waku light node with default bootstrap
+                    this.node = await createLightNode({ defaultBootstrap: true });
+                    console.log('Waku node created');
+                    
+                    // Create encoder for sending messages
+                    const encoder = this.node.createEncoder({ contentTopic: this.contentTopic });
+                    
+                    // Create message channel for collaborative board
+                    this.messageChannel = MessageChannel.create(this.node, "collaborative-board", this.userId, encoder);
+                    console.log('Message channel created for user ID:', this.userId);
+                    
+                    // Start the Waku node
+                    await this.node.start();
+                    console.log('Waku node started successfully');
+                    
+                    // Set up message event listeners
+                    this.setupMessageChannelListeners();
+                    
+                    // Set up peer connection listeners
+                    this.setupPeerListeners();
+                    
                     this.updateConnectionStatus(true);
-                    this.updatePeerCount(0);
-                }, 2000);
+                    this.updatePeerCount(0); // Will be updated when peers connect
+                    
+                } catch (error) {
+                    console.error('Failed to initialize Waku:', error);
+                    this.updateConnectionStatus(false);
+                }
+            }
+
+            setupMessageChannelListeners() {
+                // Listen for sent messages (acknowledgment)
+                this.messageChannel.addEventListener('sent', (event) => {
+                    console.log('Message sent event:', event);
+                    // TODO: Handle message sent acknowledgment
+                });
+
+                // Listen for acknowledged messages
+                this.messageChannel.addEventListener('acknowledged', (event) => {
+                    console.log('Message acknowledged event:', event);
+                    this.onMessageAcknowledged(event.detail.messageId);
+                });
+
+                // Listen for received messages
+                this.messageChannel.addEventListener('receive', (event) => {
+                    console.log('Message received event:', event);
+                    this.onMessageReceived(event.detail.payload, event.detail.senderId);
+                });
+            }
+
+            setupPeerListeners() {
+                // Listen for peer connections
+                this.node.libp2p.addEventListener('peer:connect', (event) => {
+                    console.log('Peer connected:', event.detail);
+                    this.handlePeerConnect(event.detail);
+                });
+
+                // Listen for peer disconnections
+                this.node.libp2p.addEventListener('peer:disconnect', (event) => {
+                    console.log('Peer disconnected:', event.detail);
+                    this.handlePeerDisconnect(event.detail);
+                });
+            }
+
+            handlePeerConnect(peerId) {
+                this.connectedPeers.add(peerId.toString());
+                this.updatePeerCount(this.connectedPeers.size);
+                console.log(`Peer connected. Total peers: ${this.connectedPeers.size}`);
+            }
+
+            handlePeerDisconnect(peerId) {
+                this.connectedPeers.delete(peerId.toString());
+                this.updatePeerCount(this.connectedPeers.size);
+                console.log(`Peer disconnected. Total peers: ${this.connectedPeers.size}`);
             }
 
             startDrawing(e) {
@@ -566,45 +652,61 @@
                 return 'stroke_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
             }
 
-            // Waku message sending methods (to be implemented)
-            sendStrokeMessage(strokeData) {
+            // Waku message sending methods
+            async sendStrokeMessage(strokeData) {
                 try {
+                    if (!this.messageChannel) {
+                        console.warn('MessageChannel not initialized, cannot send stroke message');
+                        return;
+                    }
+                    
                     const encodedMessage = this.encodeStrokeMessage(strokeData);
                     console.log('Sending encoded stroke message:', encodedMessage);
                     
-                    // TODO: Send encodedMessage via Waku
-                    // await this.wakuNode.lightPush.send(encodedMessage, { contentTopic: this.contentTopic });
+                    // Send via Waku MessageChannel
+                    await this.messageChannel.send(encodedMessage);
                     
-                    // Simulate message sent event
-                    setTimeout(() => {
-                        this.onMessageSent(strokeData.id, strokeData);
-                    }, 100);
+                    // Trigger sent event for UI feedback
+                    this.onMessageSent(strokeData.id, strokeData);
+                    
                 } catch (error) {
-                    console.error('Failed to encode stroke message:', error);
+                    console.error('Failed to send stroke message:', error);
                 }
             }
 
-            sendCursorPosition(x, y) {
+            async sendCursorPosition(x, y) {
                 try {
+                    if (!this.messageChannel) {
+                        console.warn('MessageChannel not initialized, cannot send cursor position');
+                        return;
+                    }
+                    
                     const encodedMessage = this.encodeCursorMessage(x, y);
                     console.log('Sending encoded cursor message:', encodedMessage);
                     
-                    // TODO: Send encodedMessage via Waku
-                    // await this.wakuNode.lightPush.send(encodedMessage, { contentTopic: this.contentTopic });
+                    // Send via Waku MessageChannel
+                    await this.messageChannel.send(encodedMessage);
+                    
                 } catch (error) {
-                    console.error('Failed to encode cursor message:', error);
+                    console.error('Failed to send cursor message:', error);
                 }
             }
 
-            sendClearMessage(clearMessage) {
+            async sendClearMessage(clearMessage) {
                 try {
+                    if (!this.messageChannel) {
+                        console.warn('MessageChannel not initialized, cannot send clear message');
+                        return;
+                    }
+                    
                     const encodedMessage = this.encodeClearMessage();
                     console.log('Sending encoded clear message:', encodedMessage);
                     
-                    // TODO: Send encodedMessage via Waku
-                    // await this.wakuNode.lightPush.send(encodedMessage, { contentTopic: this.contentTopic });
+                    // Send via Waku MessageChannel
+                    await this.messageChannel.send(encodedMessage);
+                    
                 } catch (error) {
-                    console.error('Failed to encode clear message:', error);
+                    console.error('Failed to send clear message:', error);
                 }
             }
 
