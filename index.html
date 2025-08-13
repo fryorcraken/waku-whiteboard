@@ -171,21 +171,7 @@
             100% { transform: rotate(360deg); }
         }
 
-        .user-cursors {
-            position: absolute;
-            pointer-events: none;
-        }
 
-        .user-cursor {
-            position: absolute;
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            border: 2px solid white;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
-            transform: translate(-50%, -50%);
-            transition: all 0.1s ease;
-        }
     </style>
 </head>
 <body>
@@ -212,7 +198,6 @@
 
     <div class="canvas-container">
         <canvas id="whiteboard" width="800" height="600"></canvas>
-        <div class="user-cursors" id="userCursors"></div>
     </div>
 
     <div class="pending-strokes" id="pendingStrokes" style="display: none;">
@@ -235,11 +220,10 @@
                 uint64 timestamp = 1;
                 string userId = 2;
                 string messageId = 3;
-                oneof content {
-                    StrokeData stroke = 4;
-                    CursorData cursor = 5;
-                    ClearData clear = 6;
-                }
+                 oneof content {
+                     StrokeData stroke = 4;
+                     ClearData clear = 5;
+                 }
             }
             
             message StrokeData {
@@ -254,13 +238,7 @@
                 float y = 2;
             }
             
-            message CursorData {
-                float x = 1;
-                float y = 2;
-                string color = 3;
-            }
-            
-            message ClearData {
+             message ClearData {
                 bool clearAll = 1;
             }
         `;
@@ -274,10 +252,8 @@
                 this.currentStroke = [];
                 this.pendingStrokes = new Map();
                 this.acknowledgedStrokes = new Set();
-                this.userCursors = new Map();
                 this.connectedPeers = new Set();
                 this.userId = this.generateOrRetrieveUserId();
-                this.userColor = this.generateRandomColor();
                 
                 this.initializeProtobuf();
                 this.setupCanvas();
@@ -316,18 +292,9 @@
                 return userId;
             }
 
-            generateRandomColor() {
-                const colors = [
-                    '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7',
-                    '#DDA0DD', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E9',
-                    '#F8C471', '#82E0AA', '#F1948A', '#85C1E9', '#D7BDE2'
-                ];
-                return colors[Math.floor(Math.random() * colors.length)];
-            }
+
 
             setInitialColor() {
-                const colorPicker = document.getElementById('colorPicker');
-                colorPicker.value = this.userColor;
                 this.updateBrushSettings();
             }
 
@@ -350,24 +317,7 @@
                 return this.WhiteboardMessage.encode(message).finish();
             }
 
-            encodeCursorMessage(x, y) {
-                const message = {
-                    timestamp: Date.now(),
-                    userId: this.userId,
-                    messageId: 'cursor_' + Date.now(),
-                    cursor: {
-                        x: x,
-                        y: y,
-                        color: this.userColor
-                    }
-                };
-                
-                const errMsg = this.WhiteboardMessage.verify(message);
-                if (errMsg) throw Error(errMsg);
-                
-                const encoded = this.WhiteboardMessage.encode(message).finish();
-                return encoded;
-            }
+
 
             encodeClearMessage() {
                 const message = {
@@ -382,8 +332,7 @@
                 const errMsg = this.WhiteboardMessage.verify(message);
                 if (errMsg) throw Error(errMsg);
                 
-                const encoded = this.WhiteboardMessage.encode(message).finish();
-                return encoded;
+                return this.WhiteboardMessage.encode(message).finish();
             }
 
             decodeMessage(encodedData) {
@@ -414,8 +363,7 @@
                 this.canvas.addEventListener('touchmove', this.handleTouch.bind(this));
                 this.canvas.addEventListener('touchend', this.stopDrawing.bind(this));
 
-                // Cursor tracking
-                this.canvas.addEventListener('mousemove', this.trackCursor.bind(this));
+
 
                 // UI controls
                 document.getElementById('colorPicker').addEventListener('change', this.updateBrushSettings.bind(this));
@@ -424,46 +372,38 @@
             }
 
             setupWakuEventListeners() {
-                // TODO: Implement Waku event listeners
-                
-                // Event: Message sent successfully
-                this.onMessageSent = (messageId, strokeData) => {
-                    console.log('Message sent:', messageId, strokeData);
-                    this.addPendingStroke(messageId, strokeData);
-                };
-
-                // Event: Message acknowledged by peers
-                this.onMessageAcknowledged = (messageId) => {
-                    console.log('Message acknowledged:', messageId);
-                    this.markStrokeAcknowledged(messageId);
-                };
-
-                // Event: New message received from peer
-                this.onMessageReceived = (encodedData, senderId) => {
-                    try {
-                        const decodedMessage = this.decodeMessage(encodedData);
-                        if (!decodedMessage) return;
-                        
-                        console.log('Message received:', decodedMessage);
-                        
-                        // Handle different message types
-                        if (decodedMessage.stroke) {
-                            this.drawReceivedStroke(decodedMessage.stroke, decodedMessage.userId);
-                        } else if (decodedMessage.cursor) {
-                            this.updateUserCursor(decodedMessage.userId, 
-                                                decodedMessage.cursor.x, 
-                                                decodedMessage.cursor.y, 
-                                                decodedMessage.cursor.color);
-                        } else if (decodedMessage.clear) {
-                            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-                        }
-                    } catch (error) {
-                        console.error('Failed to process received message:', error);
-                    }
-                };
-
-                // Placeholder for Waku initialization
+                // Initialize Waku connection
                 this.initializeWaku();
+            }
+
+            handleIncomingMessage(wakuMessage) {
+                try {
+                    if (!wakuMessage.payload || !wakuMessage.payload.length || !this.WhiteboardMessage) return;
+
+                    // Get message ID for deduplication
+                    const messageId = MessageChannel.getMessageId(wakuMessage.payload);
+                    if (this.seenMessages.has(messageId)) return;
+
+                    this.seenMessages.add(messageId);
+
+                    // Decode the message
+                    const decodedMessage = this.decodeMessage(wakuMessage.payload);
+                    if (!decodedMessage) return;
+                    
+                    console.log('Message received:', decodedMessage);
+                    
+                    // Only process messages from other users
+                    if (decodedMessage.userId === this.userId) return;
+                    
+                    // Handle different message types
+                    if (decodedMessage.stroke) {
+                        this.drawReceivedStroke(decodedMessage.stroke, decodedMessage.userId);
+                    } else if (decodedMessage.clear) {
+                        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                    }
+                } catch (error) {
+                    console.error('Failed to process received message:', error);
+                }
             }
 
             async initializeWaku() {
@@ -492,8 +432,11 @@
                     // Set up peer connection listeners
                     this.setupPeerListeners();
                     
-                    this.updateConnectionStatus(true);
-                    this.updatePeerCount(0); // Will be updated when peers connect
+                    // Start with waiting status
+                    this.updateConnectionStatus(false);
+                    this.updatePeerCount(0);
+                    
+                    console.log('Waku whiteboard initialized successfully');
                     
                 } catch (error) {
                     console.error('Failed to initialize Waku:', error);
@@ -502,26 +445,30 @@
             }
 
             setupMessageChannelListeners() {
-                // Listen for sent messages (acknowledgment)
-                this.messageChannel.addEventListener('sent', (event) => {
-                    console.log('Message sent event:', event);
-                    // TODO: Handle message sent acknowledgment
-                });
+                // Create decoder for incoming messages
+                this.decoder = this.node.createDecoder({ contentTopic: this.contentTopic });
 
-                // Listen for acknowledged messages
-                this.messageChannel.addEventListener('acknowledged', (event) => {
-                    console.log('Message acknowledged event:', event);
-                    this.onMessageAcknowledged(event.detail.messageId);
-                });
+                // Subscribe to messages
+                this.messageChannel.subscribe([this.decoder]);
 
-                // Listen for received messages
-                this.messageChannel.addEventListener('receive', (event) => {
+                // Listen for incoming messages
+                this.messageChannel.addEventListener(MessageChannelEvent.InMessageReceived, (event) => {
                     console.log('Message received event:', event);
-                    this.onMessageReceived(event.detail.payload, event.detail.senderId);
+                    this.handleIncomingMessage(event.detail);
                 });
+
+                // Listen for sent messages (global feedback)
+                this.messageChannel.addEventListener(MessageChannelEvent.OutMessageSent, (event) => {
+                    console.log('Message sent event:', event.detail.toString().substring(0, 12) + '...');
+                });
+
+                // Initialize seenMessages for deduplication
+                this.seenMessages = new Set();
             }
 
             setupPeerListeners() {
+                if (!this.node || !this.node.libp2p) return;
+
                 // Listen for peer connections
                 this.node.libp2p.addEventListener('peer:connect', (event) => {
                     console.log('Peer connected:', event.detail);
@@ -533,17 +480,57 @@
                     console.log('Peer disconnected:', event.detail);
                     this.handlePeerDisconnect(event.detail);
                 });
+
+                // Start monitoring peer connections
+                this.startPeerCountMonitoring();
+            }
+
+            startPeerCountMonitoring() {
+                // Update peer count immediately and then every 5 seconds
+                this.updatePeerCountFromWaku();
+                setInterval(() => {
+                    this.updatePeerCountFromWaku();
+                }, 5000);
+            }
+
+            async updatePeerCountFromWaku() {
+                if (this.node && this.node.libp2p && this.node.libp2p.getConnections) {
+                    try {
+                        const connections = this.node.libp2p.getConnections();
+                        const activeConnections = connections.filter(conn => conn.status === 'open');
+                        const connectedPeers = activeConnections.length;
+
+                        this.updatePeerCount(connectedPeers);
+                        this.updateConnectionStatus(connectedPeers > 0);
+                    } catch (error) {
+                        console.warn('Could not get connection count:', error);
+                        this.updatePeerCount(0);
+                        this.updateConnectionStatus(false);
+                    }
+                }
             }
 
             handlePeerConnect(peerId) {
                 this.connectedPeers.add(peerId.toString());
                 this.updatePeerCount(this.connectedPeers.size);
+                
+                // Set connected status only when we have at least one peer
+                if (this.connectedPeers.size === 1) {
+                    this.updateConnectionStatus(true);
+                }
+                
                 console.log(`Peer connected. Total peers: ${this.connectedPeers.size}`);
             }
 
             handlePeerDisconnect(peerId) {
                 this.connectedPeers.delete(peerId.toString());
                 this.updatePeerCount(this.connectedPeers.size);
+                
+                // Set disconnected status when no peers are connected
+                if (this.connectedPeers.size === 0) {
+                    this.updateConnectionStatus(false);
+                }
+                
                 console.log(`Peer disconnected. Total peers: ${this.connectedPeers.size}`);
             }
 
@@ -616,14 +603,7 @@
                 this.canvas.dispatchEvent(mouseEvent);
             }
 
-            trackCursor(e) {
-                const rect = this.canvas.getBoundingClientRect();
-                const x = e.clientX - rect.left;
-                const y = e.clientY - rect.top;
 
-                // TODO: Send cursor position via Waku
-                this.sendCursorPosition(x, y);
-            }
 
             updateBrushSettings() {
                 const color = document.getElementById('colorPicker').value;
@@ -663,34 +643,34 @@
                     const encodedMessage = this.encodeStrokeMessage(strokeData);
                     console.log('Sending encoded stroke message:', encodedMessage);
                     
+                    // Get message ID for tracking acknowledgments
+                    const messageId = MessageChannel.getMessageId(encodedMessage);
+                    
+                    // Set up acknowledgment listener for this specific message
+                    this.messageChannel.addEventListener(MessageChannelEvent.OutMessageSent, (event) => {
+                        if (messageId === event.detail) {
+                            this.updateStrokeStatus(strokeData.id, 'sent');
+                        }
+                    });
+
+                    this.messageChannel.addEventListener(MessageChannelEvent.OutMessageAcknowledged, (event) => {
+                        if (messageId === event.detail) {
+                            this.updateStrokeStatus(strokeData.id, 'acknowledged');
+                        }
+                    });
+                    
                     // Send via Waku MessageChannel
                     await this.messageChannel.send(encodedMessage);
                     
-                    // Trigger sent event for UI feedback
-                    this.onMessageSent(strokeData.id, strokeData);
+                    // Add to pending with sending status
+                    this.addPendingStroke(strokeData.id, strokeData);
                     
                 } catch (error) {
                     console.error('Failed to send stroke message:', error);
                 }
             }
 
-            async sendCursorPosition(x, y) {
-                try {
-                    if (!this.messageChannel) {
-                        console.warn('MessageChannel not initialized, cannot send cursor position');
-                        return;
-                    }
-                    
-                    const encodedMessage = this.encodeCursorMessage(x, y);
-                    console.log('Sending encoded cursor message:', encodedMessage);
-                    
-                    // Send via Waku MessageChannel
-                    await this.messageChannel.send(encodedMessage);
-                    
-                } catch (error) {
-                    console.error('Failed to send cursor message:', error);
-                }
-            }
+
 
             async sendClearMessage(clearMessage) {
                 try {
@@ -700,7 +680,7 @@
                     }
                     
                     const encodedMessage = this.encodeClearMessage();
-                    console.log('Sending encoded clear message:', encodedMessage);
+                    console.log('Sending clear message to peers');
                     
                     // Send via Waku MessageChannel
                     await this.messageChannel.send(encodedMessage);
@@ -727,7 +707,16 @@
                 }, 2000);
             }
 
-            drawReceivedStroke(strokeData, senderId) {
+            updateStrokeStatus(strokeId, status) {
+                if (status === 'sent') {
+                    console.log('Stroke sent:', strokeId);
+                } else if (status === 'acknowledged') {
+                    console.log('Stroke acknowledged:', strokeId);
+                    this.markStrokeAcknowledged(strokeId);
+                }
+            }
+
+            drawReceivedStroke(strokeData) {
                 const points = strokeData.points;
                 if (!points || points.length < 2) return;
 
@@ -772,29 +761,20 @@
 
             updateConnectionStatus(connected) {
                 const statusEl = document.getElementById('connectionStatus');
-                statusEl.textContent = connected ? 'Connected' : 'Disconnected';
-                statusEl.className = 'connection-status ' + (connected ? 'connected' : 'disconnected');
+                if (connected) {
+                    statusEl.textContent = 'Connected to Peers';
+                    statusEl.className = 'connection-status connected';
+                } else {
+                    statusEl.textContent = 'Waiting for Peers';
+                    statusEl.className = 'connection-status disconnected';
+                }
             }
 
             updatePeerCount(count) {
                 document.getElementById('peerCount').textContent = `${count} peer${count !== 1 ? 's' : ''}`;
             }
 
-            updateUserCursor(userId, x, y, color) {
-                const cursorsContainer = document.getElementById('userCursors');
-                let cursor = cursorsContainer.querySelector(`[data-user-id="${userId}"]`);
-                
-                if (!cursor) {
-                    cursor = document.createElement('div');
-                    cursor.className = 'user-cursor';
-                    cursor.setAttribute('data-user-id', userId);
-                    cursorsContainer.appendChild(cursor);
-                }
-                
-                cursor.style.left = x + 'px';
-                cursor.style.top = y + 'px';
-                cursor.style.backgroundColor = color || '#007bff';
-            }
+
         }
 
         // Initialize the whiteboard when the page loads
