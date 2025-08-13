@@ -54,14 +54,14 @@
             color: #2d5a2d;
         }
 
+        .connecting {
+            background: #e1a485;
+            color: #461900;
+        }
+
         .disconnected {
             background: #ffeaea;
             color: #8b0000;
-        }
-
-        .peer-count {
-            color: #666;
-            font-size: 0.9rem;
         }
 
         .toolbar {
@@ -87,9 +87,25 @@
         .color-picker {
             width: 40px;
             height: 40px;
-            border: none;
-            border-radius: 50%;
+            border: 2px solid #ddd;
+            border-radius: 6px;
             cursor: pointer;
+            background: none;
+            outline: none;
+        }
+
+        .color-picker::-webkit-color-swatch-wrapper {
+            padding: 0;
+        }
+
+        .color-picker::-webkit-color-swatch {
+            border: none;
+            border-radius: 4px;
+        }
+
+        .color-picker::-moz-color-swatch {
+            border: none;
+            border-radius: 4px;
         }
 
         .brush-size {
@@ -179,7 +195,6 @@
         <div class="title">🎨 Waku Collaborative Whiteboard</div>
         <div class="status">
             <div class="connection-status disconnected" id="connectionStatus">Disconnected</div>
-            <div class="peer-count" id="peerCount">0 peers</div>
         </div>
     </div>
 
@@ -209,7 +224,8 @@
         import {
             createLightNode,
             MessageChannelEvent,
-            MessageChannel
+            MessageChannel,
+            HealthStatus
         } from 'https://unpkg.com/@waku/sdk@0.0.34-ced989a.0/bundle/index.js';
 
         // Define protobuf schema for whiteboard messages
@@ -252,8 +268,9 @@
                 this.currentStroke = [];
                 this.pendingStrokes = new Map();
                 this.acknowledgedStrokes = new Set();
-                this.connectedPeers = new Set();
+                this.localStrokes = new Map(); // Track local strokes and their status
                 this.userId = this.generateOrRetrieveUserId();
+                this.userColor = this.generateOrRetrieveUserColor();
                 
                 this.initializeProtobuf();
                 this.setupCanvas();
@@ -292,10 +309,43 @@
                 return userId;
             }
 
+            generateOrRetrieveUserColor() {
+                const STORAGE_KEY = 'waku_whiteboard_user_color';
+                
+                // Try to get existing user color from localStorage
+                let userColor = localStorage.getItem(STORAGE_KEY);
+                
+                if (!userColor) {
+                    // Generate new random color if none exists
+                    const colors = [
+                        '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7',
+                        '#DDA0DD', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E9',
+                        '#F8C471', '#82E0AA', '#F1948A', '#85C1E9', '#D7BDE2'
+                    ];
+                    userColor = colors[Math.floor(Math.random() * colors.length)];
+                    
+                    // Save to localStorage for future sessions
+                    localStorage.setItem(STORAGE_KEY, userColor);
+                    console.log('Generated new user color:', userColor);
+                } else {
+                    console.log('Retrieved existing user color from cache:', userColor);
+                }
+                
+                return userColor;
+            }
+
 
 
             setInitialColor() {
+                const colorPicker = document.getElementById('colorPicker');
+                colorPicker.value = this.userColor;
                 this.updateBrushSettings();
+                
+                // Listen for color changes to update stored color
+                colorPicker.addEventListener('change', () => {
+                    this.userColor = colorPicker.value;
+                    localStorage.setItem('waku_whiteboard_user_color', this.userColor);
+                });
             }
 
             encodeStrokeMessage(strokeData) {
@@ -400,6 +450,7 @@
                         this.drawReceivedStroke(decodedMessage.stroke, decodedMessage.userId);
                     } else if (decodedMessage.clear) {
                         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                        this.localStrokes.clear(); // Clear local stroke tracking
                     }
                 } catch (error) {
                     console.error('Failed to process received message:', error);
@@ -409,7 +460,7 @@
             async initializeWaku() {
                 try {
                     console.log('Initializing Waku node...');
-                    this.updateConnectionStatus(false);
+                    this.updateConnectionStatus(HealthStatus.Unhealthy);
                     
                     // Create Waku light node with default bootstrap
                     this.node = await createLightNode({ defaultBootstrap: true });
@@ -430,17 +481,12 @@
                     this.setupMessageChannelListeners();
                     
                     // Set up peer connection listeners
-                    this.setupPeerListeners();
-                    
-                    // Start with waiting status
-                    this.updateConnectionStatus(false);
-                    this.updatePeerCount(0);
+                    this.setupWakuHealthListeners();
                     
                     console.log('Waku whiteboard initialized successfully');
                     
                 } catch (error) {
                     console.error('Failed to initialize Waku:', error);
-                    this.updateConnectionStatus(false);
                 }
             }
 
@@ -466,72 +512,14 @@
                 this.seenMessages = new Set();
             }
 
-            setupPeerListeners() {
+            setupWakuHealthListeners() {
                 if (!this.node || !this.node.libp2p) return;
 
                 // Listen for peer connections
-                this.node.libp2p.addEventListener('peer:connect', (event) => {
-                    console.log('Peer connected:', event.detail);
-                    this.handlePeerConnect(event.detail);
+                this.node.events.addEventListener('waku:health', (event) => {
+                    console.log('Waku Health:', event.detail);
+                    this.updateConnectionStatus(event.detail);
                 });
-
-                // Listen for peer disconnections
-                this.node.libp2p.addEventListener('peer:disconnect', (event) => {
-                    console.log('Peer disconnected:', event.detail);
-                    this.handlePeerDisconnect(event.detail);
-                });
-
-                // Start monitoring peer connections
-                this.startPeerCountMonitoring();
-            }
-
-            startPeerCountMonitoring() {
-                // Update peer count immediately and then every 5 seconds
-                this.updatePeerCountFromWaku();
-                setInterval(() => {
-                    this.updatePeerCountFromWaku();
-                }, 5000);
-            }
-
-            async updatePeerCountFromWaku() {
-                if (this.node && this.node.libp2p && this.node.libp2p.getConnections) {
-                    try {
-                        const connections = this.node.libp2p.getConnections();
-                        const activeConnections = connections.filter(conn => conn.status === 'open');
-                        const connectedPeers = activeConnections.length;
-
-                        this.updatePeerCount(connectedPeers);
-                        this.updateConnectionStatus(connectedPeers > 0);
-                    } catch (error) {
-                        console.warn('Could not get connection count:', error);
-                        this.updatePeerCount(0);
-                        this.updateConnectionStatus(false);
-                    }
-                }
-            }
-
-            handlePeerConnect(peerId) {
-                this.connectedPeers.add(peerId.toString());
-                this.updatePeerCount(this.connectedPeers.size);
-                
-                // Set connected status only when we have at least one peer
-                if (this.connectedPeers.size === 1) {
-                    this.updateConnectionStatus(true);
-                }
-                
-                console.log(`Peer connected. Total peers: ${this.connectedPeers.size}`);
-            }
-
-            handlePeerDisconnect(peerId) {
-                this.connectedPeers.delete(peerId.toString());
-                this.updatePeerCount(this.connectedPeers.size);
-                
-                // Set disconnected status when no peers are connected
-                if (this.connectedPeers.size === 0) {
-                    this.updateConnectionStatus(false);
-                }
-                
-                console.log(`Peer disconnected. Total peers: ${this.connectedPeers.size}`);
             }
 
             startDrawing(e) {
@@ -585,7 +573,16 @@
                         timestamp: Date.now()
                     };
 
-                    // TODO: Send stroke data via Waku
+                    // Store the stroke as local with 'sending' status
+                    this.localStrokes.set(strokeData.id, {
+                        strokeData: strokeData,
+                        status: 'sending'
+                    });
+
+                    // Redraw stroke with transparency
+                    this.redrawStrokeWithTransparency(strokeData, 'sending');
+
+                    // Send stroke data via Waku
                     this.sendStrokeMessage(strokeData);
                 }
 
@@ -618,13 +615,16 @@
             clearCanvas() {
                 this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
                 
+                // Clear local strokes tracking
+                this.localStrokes.clear();
+                
                 const clearMessage = {
                     type: 'clear',
                     userId: this.userId,
                     timestamp: Date.now()
                 };
 
-                // TODO: Send clear message via Waku
+                // Send clear message via Waku
                 this.sendClearMessage(clearMessage);
             }
 
@@ -672,7 +672,7 @@
 
 
 
-            async sendClearMessage(clearMessage) {
+            async sendClearMessage() {
                 try {
                     if (!this.messageChannel) {
                         console.warn('MessageChannel not initialized, cannot send clear message');
@@ -710,19 +710,43 @@
             updateStrokeStatus(strokeId, status) {
                 if (status === 'sent') {
                     console.log('Stroke sent:', strokeId);
+                    // Update local stroke status and redraw with new transparency
+                    if (this.localStrokes.has(strokeId)) {
+                        this.localStrokes.get(strokeId).status = 'sent';
+                        this.redrawStrokeWithTransparency(this.localStrokes.get(strokeId).strokeData, 'sent');
+                    }
                 } else if (status === 'acknowledged') {
                     console.log('Stroke acknowledged:', strokeId);
+                    // Update local stroke status and redraw with full opacity
+                    if (this.localStrokes.has(strokeId)) {
+                        this.localStrokes.get(strokeId).status = 'acknowledged';
+                        this.redrawStrokeWithTransparency(this.localStrokes.get(strokeId).strokeData, 'acknowledged');
+                    }
                     this.markStrokeAcknowledged(strokeId);
                 }
             }
 
-            drawReceivedStroke(strokeData) {
+            redrawStrokeWithTransparency(strokeData, status) {
                 const points = strokeData.points;
                 if (!points || points.length < 2) return;
 
+                // Clear the stroke area and redraw everything
+                this.redrawCanvas();
+
+                // Set transparency based on status
+                let alpha = 1.0; // Default for acknowledged or peer strokes
+                if (status === 'sending') {
+                    alpha = 0.5; // 50% transparent
+                } else if (status === 'sent') {
+                    alpha = 0.75; // 75% transparent
+                }
+
+                // Redraw this specific stroke with transparency
+                this.ctx.save();
+                this.ctx.globalAlpha = alpha;
                 this.ctx.beginPath();
-                this.ctx.strokeStyle = strokeData.color;
-                this.ctx.lineWidth = strokeData.size;
+                this.ctx.strokeStyle = points[0].color;
+                this.ctx.lineWidth = points[0].size;
                 this.ctx.moveTo(points[0].x, points[0].y);
 
                 for (let i = 1; i < points.length; i++) {
@@ -730,6 +754,54 @@
                 }
                 
                 this.ctx.stroke();
+                this.ctx.restore();
+            }
+
+            redrawCanvas() {
+                // Clear the canvas
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+                // Redraw all acknowledged local strokes with full opacity
+                this.localStrokes.forEach((strokeInfo, _strokeId) => {
+                    if (strokeInfo.status === 'acknowledged') {
+                        this.drawStrokeWithAlpha(strokeInfo.strokeData, 1.0);
+                    } else if (strokeInfo.status === 'sent') {
+                        this.drawStrokeWithAlpha(strokeInfo.strokeData, 0.75);
+                    } else if (strokeInfo.status === 'sending') {
+                        this.drawStrokeWithAlpha(strokeInfo.strokeData, 0.5);
+                    }
+                });
+            }
+
+            drawStrokeWithAlpha(strokeData, alpha) {
+                const points = strokeData.points;
+                if (!points || points.length < 2) return;
+
+                this.ctx.save();
+                this.ctx.globalAlpha = alpha;
+                this.ctx.beginPath();
+                this.ctx.strokeStyle = points[0].color;
+                this.ctx.lineWidth = points[0].size;
+                this.ctx.moveTo(points[0].x, points[0].y);
+
+                for (let i = 1; i < points.length; i++) {
+                    this.ctx.lineTo(points[i].x, points[i].y);
+                }
+                
+                this.ctx.stroke();
+                this.ctx.restore();
+            }
+
+            drawReceivedStroke(strokeData, senderId) {
+                // Store received stroke as a peer stroke with full opacity
+                const peerStrokeId = `peer_${senderId}_${Date.now()}`;
+                this.localStrokes.set(peerStrokeId, {
+                    strokeData: strokeData,
+                    status: 'acknowledged' // Peer strokes are always fully visible
+                });
+
+                // Redraw canvas to include this new stroke
+                this.redrawCanvas();
             }
 
             updatePendingStrokesUI() {
@@ -759,20 +831,21 @@
                 });
             }
 
-            updateConnectionStatus(connected) {
+            updateConnectionStatus(healthStatus) {
                 const statusEl = document.getElementById('connectionStatus');
-                if (connected) {
-                    statusEl.textContent = 'Connected to Peers';
+                if (healthStatus === HealthStatus.SufficientlyHealthy) {
+                    statusEl.textContent = 'Connected';
                     statusEl.className = 'connection-status connected';
+                } else if (healthStatus === HealthStatus.MinimallyHealthy) {
+                    statusEl.textContent = 'Connecting';
+                    statusEl.className = 'connection-status connecting';
                 } else {
-                    statusEl.textContent = 'Waiting for Peers';
+                    statusEl.textContent = 'Disconnected';
                     statusEl.className = 'connection-status disconnected';
                 }
             }
 
-            updatePeerCount(count) {
-                document.getElementById('peerCount').textContent = `${count} peer${count !== 1 ? 's' : ''}`;
-            }
+
 
 
         }
