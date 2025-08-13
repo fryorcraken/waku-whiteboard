@@ -275,7 +275,7 @@
                 this.initializeProtobuf();
                 this.setupCanvas();
                 this.setupEventListeners();
-                this.setupWakuEventListeners();
+                this.initializeWaku();
                 this.setInitialColor();
             }
 
@@ -421,10 +421,7 @@
                 document.getElementById('clearBtn').addEventListener('click', this.clearCanvas.bind(this));
             }
 
-            setupWakuEventListeners() {
-                // Initialize Waku connection
-                this.initializeWaku();
-            }
+
 
             handleIncomingMessage(wakuMessage) {
                 try {
@@ -736,9 +733,9 @@
                 // Set transparency based on status
                 let alpha = 1.0; // Default for acknowledged or peer strokes
                 if (status === 'sending') {
-                    alpha = 0.5; // 50% transparent
+                    alpha = 0.2; // 20% transparent
                 } else if (status === 'sent') {
-                    alpha = 0.75; // 75% transparent
+                    alpha = 0.6; // 60% transparent
                 }
 
                 // Redraw this specific stroke with transparency
