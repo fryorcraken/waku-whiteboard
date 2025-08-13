@@ -790,10 +790,20 @@
             }
 
             drawReceivedStroke(strokeData, senderId) {
+                // Ensure points have the correct color information from the stroke
+                const normalizedStrokeData = {
+                    ...strokeData,
+                    points: strokeData.points.map(point => ({
+                        ...point,
+                        color: strokeData.color,
+                        size: strokeData.size
+                    }))
+                };
+
                 // Store received stroke as a peer stroke with full opacity
                 const peerStrokeId = `peer_${senderId}_${Date.now()}`;
                 this.localStrokes.set(peerStrokeId, {
-                    strokeData: strokeData,
+                    strokeData: normalizedStrokeData,
                     status: 'acknowledged' // Peer strokes are always fully visible
                 });
 
