@@ -224,8 +224,7 @@
         import {
             createLightNode,
             MessageChannelEvent,
-            MessageChannel,
-            HealthStatus
+            MessageChannel
         } from 'https://unpkg.com/@waku/sdk@0.0.34-ced989a.0/bundle/index.js';
 
         // Define protobuf schema for whiteboard messages
@@ -271,6 +270,7 @@
                 this.localStrokes = new Map(); // Track local strokes and their status
                 this.userId = this.generateOrRetrieveUserId();
                 this.userColor = this.generateOrRetrieveUserColor();
+                this.peerCount = 0;
                 
                 this.initializeProtobuf();
                 this.setupCanvas();
@@ -413,8 +413,6 @@
                 this.canvas.addEventListener('touchmove', this.handleTouch.bind(this));
                 this.canvas.addEventListener('touchend', this.stopDrawing.bind(this));
 
-
-
                 // UI controls
                 document.getElementById('colorPicker').addEventListener('change', this.updateBrushSettings.bind(this));
                 document.getElementById('brushSize').addEventListener('input', this.updateBrushSettings.bind(this));
@@ -457,7 +455,7 @@
             async initializeWaku() {
                 try {
                     console.log('Initializing Waku node...');
-                    this.updateConnectionStatus(HealthStatus.Unhealthy);
+                    this.updateConnectionStatus();
                     
                     // Create Waku light node with default bootstrap
                     this.node = await createLightNode({ defaultBootstrap: true });
@@ -513,9 +511,17 @@
                 if (!this.node || !this.node.libp2p) return;
 
                 // Listen for peer connections
-                this.node.events.addEventListener('waku:health', (event) => {
-                    console.log('Waku Health:', event.detail);
-                    this.updateConnectionStatus(event.detail);
+                this.node.libp2p.addEventListener('peer:connect', (event) => {
+                    console.log('Peer connected:', event.detail);
+                    this.peerConnected()
+                    this.updateConnectionStatus();
+                });
+
+                // Listen for peer disconnections
+                this.node.libp2p.addEventListener('peer:disconnect', (event) => {
+                    console.log('Peer disconnected:', event.detail);
+                    this.peerDisconnected()
+                    this.updateConnectionStatus();
                 });
             }
 
@@ -596,8 +602,6 @@
                 });
                 this.canvas.dispatchEvent(mouseEvent);
             }
-
-
 
             updateBrushSettings() {
                 const color = document.getElementById('colorPicker').value;
@@ -838,23 +842,26 @@
                 });
             }
 
-            updateConnectionStatus(healthStatus) {
+            peerConnected() {
+                this.peerCount++
+                this.updateConnectionStatus()
+            }
+
+            peerDisconnected() {
+                this.peerCount--
+                this.updateConnectionStatus()
+            }
+
+            updateConnectionStatus() {
                 const statusEl = document.getElementById('connectionStatus');
-                if (healthStatus === HealthStatus.SufficientlyHealthy) {
+                if (this.peerCount > 0) {
                     statusEl.textContent = 'Connected';
                     statusEl.className = 'connection-status connected';
-                } else if (healthStatus === HealthStatus.MinimallyHealthy) {
-                    statusEl.textContent = 'Connecting';
-                    statusEl.className = 'connection-status connecting';
                 } else {
                     statusEl.textContent = 'Disconnected';
                     statusEl.className = 'connection-status disconnected';
                 }
             }
-
-
-
-
         }
 
         // Initialize the whiteboard when the page loads
